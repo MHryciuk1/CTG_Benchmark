@@ -1,0 +1,3 @@
+[submodule "BBScore"]
+	path = BBScore
+	url = git@github.com:zcsheng95/BBScore.git
