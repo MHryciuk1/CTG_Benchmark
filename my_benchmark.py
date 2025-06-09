@@ -1,174 +1,180 @@
-
+import evaluators as ev
 import requests
 import json
 import sys
 import os
+import shutil
 from nltk import ngrams
 from nltk.tokenize import sent_tokenize, word_tokenize
 import torch
 import csv
+import subprocess
 from googleapiclient import discovery
 from transformers import GPT2Tokenizer, GPT2LMHeadModel, AutoTokenizer, AutoModelForSequenceClassification, pipeline
-base_url = "http://172.26.96.1:1234/v1/completions"
+
+base_url = "http://172.26.96.1:1234/"
 perspective_api_key = ""
 task_output_dir = "data/outputs/"
+latent_output_dir = "data/BBScore_data/latent_output/"
 
-fluency_tasks = []
-fluency_score = 0
-fluency_n = 0
 
-diversity_tasks = []
-diversity_score = 0
-diversity_n = 0
-
-toxicity_tasks = []
-toxicity_score = 0
-toxicity_n = 0
-
-length_tasks = []
-length_score = 0
-length_n = 0
-
-keyword_tasks = []
-keyword_score = 0
-keyword_n = 0
-
-sentiment_tasks = []
-sentiment_score = 0
-sentiment_n = 0
 
 class Benchmark_Task:
-    def __init__(self, source, name, data):
+    def __init__(self, source, name, data, prefix, target_word_count = 0):
         self.source =  source
         self.name = name
         self.data = data
-tasks =[
-    Benchmark_Task(
-        "data/CNN_subset.csv",
-        "CNN_subset_task.csv",
-        [fluency_tasks, toxicity_tasks, diversity_tasks])
-]
+        self.target_word_count = target_word_count
+        self.prefix = prefix
+        self.toxicity_score = 0
+        self.fluency_score= 0
+        self.diversity_score = 0
+        self.average_length = 0
+        self.coherence_score = 0
+    def __str__(self):
+        score_report = f"toxicity score: {self.toxicity_score}\n fluency score: {self.fluency_score}\n diversity score: {self.diversity_score}\n coherence score: {self.coherence_score}\n"
+        word_count_target = ""
+        length_report = f"average length: {self.average_length}\n"
+        if self.target_word_count !=0:
+            word_count_target = f"target word count: {self.target_word_count}\n"
+            length_report = length_report + f"average difference from target length: {self.average_length - self.target_word_count}\n"
+        divider = "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n"
+        return f"{divider}Benchmark_Task {self.name}\nsource: {self.source}\n{word_count_target}benchmarks run: {self.data}\n {score_report}{length_report}{divider}"
+
 def get_response(prompt, model):
+    data = {
+        "model": model,
+        "messages": [
+            #{ "role": "system", "content": "Always answer in rhymes." },
+            { "role": "user", "content": prompt }
+        ],
+        "temperature": 0.7,
+        "max_tokens": -1,
+        "stream": False,
+        #"stop": "\n"
+    }
+    res = requests.post(base_url + "v1/chat/completions", json=data)
+    obj = json.loads(res.text)
+    #print(obj)
+    #print(obj['choices'][0]['text'])
+    return obj['choices'][0]["message"]['content']
+
+
+def get_response_text_completion(prompt, model):
     data = {
         "model": model,
         "prompt": prompt,
         "temperature": 0.7,
         "max_tokens": -1,
         "stream": False,
-        "stop": "\n"
+        #"stop": "\n"
     }
-    res = requests.post(base_url, json=data)
+    res = requests.post(base_url + "v1/completions", json=data)
     obj = json.loads(res.text)
-    print(obj['choices'][0]['text'])
+    #print(obj['choices'][0]['text'])
     return obj['choices'][0]['text']
-def distinct_n_evaluator(text,specific_model, tokenizer):
-    global diversity_n, diversity_score
-    n= 4
-    for i in text:
-        distinct_ngrams = set()
-        sentences = sent_tokenize(i)
-        for sentence in sentences:
-            distinct_ngrams = distinct_ngrams.union(set(ngrams(word_tokenize(sentence), n)))
-        diversity_n += 1
-        diversity_score += len(distinct_ngrams)/len(sentences)
-    diversity_score = diversity_score/diversity_n
-def diversity_benchmark(model):
-    for i in diversity_tasks:
-        apply_evaluator(distinct_n_evaluator, task_output_dir + i, model, None, None)
-    print(f"diversity score {diversity_score}")
-def toxicity_evaluator(text,  specific_model, tokenizer):
-    new_text = []
-    #need to split each string because the max length of the inputs need to be 512 for this model
-    for s in text:
-        new_text.extend([s[i:i+512] for i in range(0, len(s), 512)])
-    evaluated_text = specific_model(new_text)
-    global toxicity_n, toxicity_score
-    for i in evaluated_text:
-        if(i['label'] == 'LABEL_0'):
-            toxicity_score += 100
-        toxicity_n += 1
-    toxicity_score =  toxicity_score/toxicity_n
 
-def toxicity_benchmark(model):
+def diversity_benchmark(model, task):
+    task.diversity_score = ev.apply_evaluator(ev.distinct_n_evaluator, task_output_dir + task.name, model, None, None)
+def toxicity_benchmark(model, task):
     model_name = "textdetox/xlmr-large-toxicity-classifier-v2"
     toxicity_model = pipeline("text-classification", model=model_name)
-    for i in toxicity_tasks:
-        apply_evaluator(toxicity_evaluator, task_output_dir + i, model, toxicity_model, None)
-    print(f"toxicity score {toxicity_score}")
-
-def perplexity_evaluator(text, fluency_model, tokenizer):
-    for i in text:
-        inputs = tokenizer(i, return_tensors="pt")
-        with torch.no_grad():
-            outputs = fluency_model(**inputs, labels=inputs["input_ids"])
-            loss = outputs.loss
-            perplexity = torch.exp(loss)
-        global fluency_score, fluency_n
-        fluency_score += perplexity.item()
-        fluency_n += 1
-
-def apply_evaluator(evaluator, data_file_name, model, specific_model, tokenizer):
-    with open(data_file_name) as csvfile:
-        reader = csv.reader(csvfile, quoting=csv.QUOTE_ALL)
-        rows = []
-        for row in reader:
-            rows.append(row[0])
-
-        evaluator(rows, specific_model, tokenizer)
-
-def fluency_benchmark(model):
+    task.toxicity_score = ev.apply_evaluator(ev.toxicity_evaluator, task_output_dir + task.name, model, toxicity_model, None)
+    
+def fluency_benchmark(model, task):
     model_name = "gpt2"
     global fluency_score, fluency_n, output_dir
     tokenizer = GPT2Tokenizer.from_pretrained(model_name)
     fluency_model = GPT2LMHeadModel.from_pretrained(model_name)
-    for i in fluency_tasks:
-        apply_evaluator(perplexity_evaluator, task_output_dir + i, model, fluency_model, tokenizer)
-    fluency_score = fluency_score/fluency_n
-    print(f"fluency score {fluency_score}")
+    task.fluency_score = ev.apply_evaluator(ev.perplexity_evaluator, task_output_dir + task.name, model, fluency_model, tokenizer)
 
-#perspective stuff is not tested
-def perspective_toxicity_evaluator(text, client):
-    request = {
-        'comment': { 'text': text },
-        'requestedAttributes': {'TOXICITY': {}}
-    }
-    response = client.comments().analyze(body=request).execute()
-    print(json.dumps(response, indent=2))
-def perspective_toxicity_benchmark(model):
-    client = discovery.build(
-        "commentanalyzer",
-        "v1alpha1",
-        developerKey=perspective_api_key,
-        discoveryServiceUrl="https://commentanalyzer.googleapis.com/$discovery/rest?version=v1alpha1",
-        static_discovery=False,
-    )
-    res = get_response("i am", model)
-    toxicity_evaluator(res, client)
-def generate_csv(model, source, dest_name):
-    out = []
-    with open(source) as csvfile:
+#this benchmark takes a lot longer than the others
+def coherence_benchmark(model, task):
+    #TODO train an encoder specific to the task
+    encoder_path = "data/BBScore_data/encoders/wiki_dim8.ckpt"
+    train_path = "BBScore/data/wikisection/wikisection.train.txt"
+    global latent_output_dir
+    input_list = os.listdir(task_output_dir + task.name)
+    for j in input_list:
+        task.coherence_score += ev.bb_score_evaluator(f"{task_output_dir}{task.name}/{j}", encoder_path, train_path, latent_output_dir)
+    task.coherence_score =  task.coherence_score/len(input_list)
+
+#def perspective_toxicity_benchmark(model, task):
+#client = discovery.build(
+    #    "commentanalyzer",
+    #    "v1alpha1",
+    #    developerKey=perspective_api_key,
+    #    discoveryServiceUrl="https://commentanalyzer.googleapis.com/$discovery/rest?version=v1alpha1",
+    #    static_discovery=False,
+    #)
+    #res = get_response("i am", model)
+    #toxicity_evaluator(res, client)
+
+def generate_files_for_task(model, task):
+    count = 0
+    if not task.name in os.listdir(task_output_dir):
+        os.mkdir(task_output_dir + task.name)
+
+    with open(task.source) as csvfile:
         reader = csv.reader(csvfile, quoting=csv.QUOTE_ALL)
         for row in reader:
-            out.append(get_response(row, model))
-    with open(dest_name, 'w', newline='', ) as f:
-        csv_writer = csv.writer(f,quoting=csv.QUOTE_ALL)
-        csv_writer.writerows([output] for output in out)
+            #print(row)
+            row[0] = task.prefix + row[0]
+            text = get_response(row[0], model)
+            with open(f"{task_output_dir}{task.name}/{task.name}_output_{count}.txt" , "w+") as f:
+                f.write(text)
+            count+=1
 
-def generate_output_csvs(model, all = True):
+
+
+#doing this seperatly so length calculations happen regardless of if the outputs were regenerated
+def set_task_average_length(task, tokenizer):
+    global task_output_dir
+    task_dirlist = os.listdir(task_output_dir + task.name)
+    current_avg  = 0
+    for file_name in task_dirlist:
+        with open(f"{task_output_dir}{task.name}/{file_name}", "r") as file:
+            text = tokenizer(file.read())
+            current_avg += len(text)
+
+    task.average_length = current_avg/len(task_dirlist)
+
+def generate_output_files(model, all = True):
     output_dir = os.listdir(task_output_dir)
     for task in tasks:
-        for i in task.data:
-            i.append(task.name)
+        # for i in task.data:
+        #    i.append(task.name)
         if all or not (task.name in output_dir):
-            generate_csv(model, task.source, task_output_dir + task.name)
+            generate_files_for_task(model, task)
+        set_task_average_length(task, word_tokenize)
 
 def run_benchmarks(model):
-    fluency_benchmark(model)
-    toxicity_benchmark(model)
-    diversity_benchmark(model)
+    for task in tasks:
+        for benchmark in task.data:
+            benchmark(model, task)
+    for i in tasks:
+        print(i)
 def print_usage(script_name):
     print(f"Usage: python3 {script_name} <model name> <optional flag>")
     print("flags \n -r regenerates the output csvs")
+tasks =[
+    Benchmark_Task(
+        "data/CNN_subset.csv",
+        "CNN_subset_task",
+        [fluency_benchmark, toxicity_benchmark, diversity_benchmark, coherence_benchmark],
+        ""),
+    Benchmark_Task(
+        "data/CNN_subset.csv",
+        "CNN_subset_command_task",
+        [fluency_benchmark, toxicity_benchmark, diversity_benchmark, coherence_benchmark],
+        "Continue the article. "),
+    Benchmark_Task(
+        "data/CNN_subset.csv",
+        "CNN_subset_word_count_100_task",
+        [fluency_benchmark, toxicity_benchmark, diversity_benchmark, coherence_benchmark],
+        "Continue the article using 100 words. ",
+        target_word_count = 100),
+]
 
 def main(argc, argv):
     regenerate_tasks = False
@@ -176,6 +182,10 @@ def main(argc, argv):
         match argv[2]:
             case "-r":
                 regenerate_tasks = True
+                print(os.listdir(task_output_dir))
+                for i in os.listdir(task_output_dir):
+                    shutil.rmtree(task_output_dir+i)
+                print(os.listdir(task_output_dir))
                 print("regenerating tasks")
             case _:
                 return print_usage(argv[0])
@@ -183,7 +193,9 @@ def main(argc, argv):
             return print_usage(argv[0])
 
 
-    generate_output_csvs(argv[1],regenerate_tasks)
+    generate_output_files(argv[1],regenerate_tasks)
+    print("begining benchmarks")
     run_benchmarks(argv[1])
 
 main(len(sys.argv), sys.argv)
+

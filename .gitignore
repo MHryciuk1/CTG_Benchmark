@@ -3,3 +3,12 @@
 data/outputs/*
 !data/outputs/
 env/
+data/BBScore_data/latent_output/*
+!data/BBScore_data/latent_output/
+data/BBScore_data/output/*
+!data/BBScore_data/output/
+.~lock*
+test*
+__pycache*
+
+
